@@ -8,6 +8,7 @@
 #include "Eigen-3.3/Eigen/Core"
 #include "Eigen-3.3/Eigen/QR"
 #include "json.hpp"
+#include "spline.h"
 
 using namespace std;
 
@@ -69,21 +70,17 @@ int NextWaypoint(double x, double y, double theta, const vector<double> &maps_x,
 	double map_x = maps_x[closestWaypoint];
 	double map_y = maps_y[closestWaypoint];
 
-	double heading = atan2((map_y-y),(map_x-x));
+	double heading = atan2( (map_y-y),(map_x-x) );
 
-	double angle = fabs(theta-heading);
-  angle = min(2*pi() - angle, angle);
+	double angle = abs(theta-heading);
 
-  if(angle > pi()/4)
-  {
-    closestWaypoint++;
-  if (closestWaypoint == maps_x.size())
-  {
-    closestWaypoint = 0;
-  }
-  }
+	if(angle > pi()/4)
+	{
+		closestWaypoint++;
+	}
 
-  return closestWaypoint;
+	return closestWaypoint;
+
 }
 
 // Transform from Cartesian x,y coordinates to Frenet s,d coordinates
@@ -163,6 +160,198 @@ vector<double> getXY(double s, double d, const vector<double> &maps_s, const vec
 
 }
 
+enum direction
+{
+    left,
+    right,
+    inlane
+};
+
+enum fsmStates
+{
+    keepLane,
+    prepareLaneChange,
+    laneChangeLeft,
+    laneChangeRight
+};
+
+fsmStates logicalFsmState = fsmStates::keepLane;
+
+const int maxCostFront = 50;
+const int maxCostBack = 30;
+
+bool laneChangeInitiated = false;
+int laneChangeWait = 15;
+
+double closestLeftCarFrontDist = maxCostFront;
+double closestLeftCarBackDist = maxCostBack;
+double closestRightCarFrontDist = maxCostFront;
+double closestRightCarBackDist = maxCostBack;
+double closestInLaneCarFrontDist = maxCostFront;
+double closestInLaneCarBackDist = maxCostBack;
+
+void changeFsmState(fsmStates fsm)
+{
+    if(logicalFsmState != fsm)
+    {
+        logicalFsmState = fsm;
+    }
+}
+
+double costOfLaneChange(int lane, direction dir)
+{
+    double cost = 100;
+
+    if(0 == lane)
+    {
+        if(direction::left == dir)
+        {
+            return cost;
+        }
+        else if(direction::right == dir)
+        {
+            cost = (maxCostFront - closestRightCarFrontDist);
+        }
+    }
+    else if(1 == lane)
+    {
+        if(direction::left == dir)
+        {
+            cost = (maxCostFront - closestLeftCarFrontDist);
+        }
+        else if(direction::right == dir)
+        {
+            cost = (maxCostFront - closestRightCarFrontDist);
+        }
+    }
+    else if(2 == lane)
+    {
+        if(direction::left == dir)
+        {
+            cost = (maxCostFront - closestLeftCarFrontDist);
+        }
+        else if(direction::right == dir)
+        {
+            return cost;
+        }
+    }
+
+    return cost;
+}
+
+void tryLaneShift(int &lane, double car_d, bool tooCloseOnLeft, bool tooCloseOnRight)
+{
+    double leftChangeCost = costOfLaneChange(lane, direction::left);
+    double rightChangeCost = costOfLaneChange(lane, direction::right);
+
+    if ((leftChangeCost < rightChangeCost) && (leftChangeCost < 15) && (!tooCloseOnLeft))
+    {
+        lane--;
+        laneChangeInitiated = true;
+
+        changeFsmState(fsmStates::laneChangeLeft);
+    }
+    else if ((rightChangeCost < leftChangeCost) && (rightChangeCost < 15) && (!tooCloseOnRight))
+    {
+        lane++;
+        laneChangeInitiated = true;
+
+        changeFsmState(fsmStates::laneChangeRight);
+    }
+    else if ((rightChangeCost == 0) && (leftChangeCost == 0) && (rightChangeCost < 30) && (!tooCloseOnRight))
+    {
+        lane++;
+        laneChangeInitiated = true;
+
+        changeFsmState(fsmStates::laneChangeRight);
+    }
+    else
+    {
+        // Keep the lane
+    }
+}
+
+void updateDistances(direction dir, double frontCarDist, double backCarDist)
+{
+    if(dir == direction::inlane)
+    {
+        (frontCarDist < closestInLaneCarFrontDist) ? closestInLaneCarFrontDist = frontCarDist : closestInLaneCarFrontDist;
+        (backCarDist < closestInLaneCarBackDist ) ? closestInLaneCarBackDist = backCarDist : closestInLaneCarBackDist;
+    }
+    else if(dir == direction::left)
+    {
+        (frontCarDist < closestLeftCarFrontDist) ? closestLeftCarFrontDist = frontCarDist : closestLeftCarFrontDist;
+        (backCarDist < closestLeftCarBackDist ) ? closestLeftCarBackDist = backCarDist : closestLeftCarBackDist;
+    }
+    else if(dir == direction::right)
+    {
+        (frontCarDist < closestRightCarFrontDist) ? closestRightCarFrontDist = frontCarDist : closestRightCarFrontDist;
+        (backCarDist < closestRightCarBackDist ) ? closestRightCarBackDist = backCarDist : closestRightCarBackDist;
+    }
+}
+
+void getDistances(direction dir, double &frontCarDist, double &backCarDist)
+{
+    if(dir == direction::inlane)
+    {
+        frontCarDist = closestInLaneCarFrontDist;
+        backCarDist = closestInLaneCarBackDist;
+    }
+    else if(dir == direction::left)
+    {
+        frontCarDist = closestLeftCarFrontDist;
+        backCarDist = closestLeftCarBackDist;
+    }
+    else if(dir == direction::right)
+    {
+        frontCarDist = closestRightCarFrontDist;
+        backCarDist = closestRightCarBackDist;
+    }
+}
+
+bool findTooClose(vector<double> sensor_fusion, double car_s, int prev_size, int predictFactor, direction dir)
+{
+    double vx = sensor_fusion[3];
+    double vy = sensor_fusion[4];
+    double carFutureState = sensor_fusion[5];
+
+    double check_speed = sqrt(vx * vx + vy * vy);
+
+    carFutureState +=((double) prev_size * 0.02 * predictFactor * check_speed);
+
+    double frontCarDist = maxCostFront;
+    double backCarDist = maxCostBack;
+
+    getDistances(dir, frontCarDist, backCarDist);
+
+    bool result = false;
+    bool frontResult = false;
+    bool backResult = false;
+
+    if(carFutureState > car_s)
+    {
+        frontCarDist = carFutureState - car_s;
+        frontResult = (frontCarDist < 30);
+    }
+
+    if(dir == direction::inlane)
+    {
+        result = frontResult;
+    }
+    else
+    {
+        if(carFutureState <= car_s)
+        {
+            backCarDist = car_s - carFutureState;
+            backResult = (backCarDist < 10) || (carFutureState == car_s);
+        }
+        result = (frontResult || backResult);
+    }
+
+    updateDistances(dir, frontCarDist, backCarDist);
+    return result;
+}
+
 int main() {
   uWS::Hub h;
 
@@ -200,26 +389,20 @@ int main() {
   	map_waypoints_dy.push_back(d_y);
   }
 
-  h.onMessage([&map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
+  int lane_num = 1;
+  double ref_v = 0;
+
+  h.onMessage([&lane_num, &ref_v, &map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
                      uWS::OpCode opCode) {
-    // "42" at the start of the message means there's a websocket message event.
-    // The 4 signifies a websocket message
-    // The 2 signifies a websocket event
-    //auto sdata = string(data).substr(0, length);
-    //cout << sdata << endl;
     if (length && length > 2 && data[0] == '4' && data[1] == '2') {
 
       auto s = hasData(data);
-
       if (s != "") {
         auto j = json::parse(s);
         
         string event = j[0].get<string>();
         
         if (event == "telemetry") {
-          // j[1] is the data JSON object
-          
-        	// Main car's localization Data
           	double car_x = j[1]["x"];
           	double car_y = j[1]["y"];
           	double car_s = j[1]["s"];
@@ -227,29 +410,192 @@ int main() {
           	double car_yaw = j[1]["yaw"];
           	double car_speed = j[1]["speed"];
 
-          	// Previous path data given to the Planner
           	auto previous_path_x = j[1]["previous_path_x"];
           	auto previous_path_y = j[1]["previous_path_y"];
-          	// Previous path's end s and d values 
           	double end_path_s = j[1]["end_path_s"];
           	double end_path_d = j[1]["end_path_d"];
 
-          	// Sensor Fusion Data, a list of all other cars on the same side of the road.
           	auto sensor_fusion = j[1]["sensor_fusion"];
 
           	json msgJson;
 
-          	vector<double> next_x_vals;
-          	vector<double> next_y_vals;
+            int prev_size = previous_path_x.size();
 
+            if(prev_size > 0)
+            {
+                car_s = end_path_s;
+            }
 
-          	// TODO: define a path made up of (x,y) points that the car will visit sequentially every .02 seconds
+            bool tooCloseInLane = false;
+            bool tooCloseOnLeft = false;
+            bool tooCloseOnRight = false;
+
+            closestLeftCarFrontDist = maxCostFront;
+            closestLeftCarBackDist = maxCostBack;
+            closestRightCarFrontDist = maxCostFront;
+            closestRightCarBackDist = maxCostBack;
+            closestInLaneCarFrontDist = maxCostFront;
+            closestInLaneCarBackDist = maxCostBack;
+
+            for (auto &i : sensor_fusion)
+            {   
+                float d = i[6];
+                if((d < (2 + 4 * lane_num + 2)) && (d > (2 + 4 * lane_num - 2)))
+                {
+                    tooCloseInLane = tooCloseInLane || findTooClose(i, car_s, prev_size, 1, direction::inlane);
+                }
+
+                if ((lane_num != 0) && (d < (2 + 4 * (lane_num - 1) + 2))
+                    && (d > (2 + 4 * (lane_num - 1) - 2)))
+                {
+                    tooCloseOnLeft = tooCloseOnLeft || findTooClose(i, car_s, prev_size, 1, direction::left);
+                }
+
+                if ((lane_num != 2) && (d < (2 + 4 * (lane_num + 1) + 2))
+                    && (d > (2 + 4 * (lane_num + 1) - 2)))
+                {
+                    tooCloseOnRight = tooCloseOnRight || findTooClose(i, car_s, prev_size, 1, direction::right);
+                }
+            }
+
+            if((laneChangeInitiated) && (car_d < (2 + 4 * lane_num + 2)) && (car_d > (2 + 4 * lane_num - 2)))
+            {
+                if(laneChangeWait <= 0)
+                {
+                    laneChangeInitiated = false;
+                    laneChangeWait = 0;
+                }
+                else
+                {
+                    laneChangeWait--;
+                    cout << "Change Lane Stabilization::  " << endl;
+                }
+            }
+            
+            if (tooCloseInLane)
+            {
+                ref_v -= 0.4;
+
+                if(!laneChangeInitiated)
+                {
+                    changeFsmState(fsmStates::prepareLaneChange);
+                    tryLaneShift(lane_num, car_d, tooCloseOnLeft, tooCloseOnRight);
+                }
+            }
+            else if(ref_v < 49)
+            {
+                ref_v += 0.4;
+            }
+            else
+            {
+                changeFsmState(fsmStates::keepLane);
+                laneChangeWait = 0;
+            }
+
+            vector<double> pts_x;
+            vector<double> pts_y;
+
+            double ref_x = car_x;
+            double ref_y = car_y;
+            double ref_angle = deg2rad(car_yaw);
+
+            if(prev_size < 2)
+            {
+                double car_prev_x = car_x - cos(car_yaw);
+                double car_prev_y = car_y - sin(car_yaw);
+
+                pts_x.push_back(car_prev_x);
+                pts_x.push_back(car_x);
+
+                pts_y.push_back(car_prev_y);
+                pts_y.push_back(car_y);
+            }
+            else
+            {
+                ref_x = previous_path_x[prev_size-1];
+                ref_y = previous_path_y[prev_size-1];
+
+                double ref_prev_x = previous_path_x[prev_size-2];
+                double ref_prev_y = previous_path_y[prev_size-2];
+
+                ref_angle = atan2(ref_y-ref_prev_y,ref_x-ref_prev_x);
+
+                pts_x.push_back(ref_prev_x);
+                pts_x.push_back(ref_x);
+
+                pts_y.push_back(ref_prev_y);
+                pts_y.push_back(ref_y);
+            }
+
+            vector<double> nextWP0 = getXY(car_s + 30, (2 + 4 * lane_num), map_waypoints_s, map_waypoints_x, map_waypoints_y);
+            vector<double> nextWP1 = getXY(car_s + 60, (2 + 4 * lane_num), map_waypoints_s, map_waypoints_x, map_waypoints_y);
+            vector<double> nextWP2 = getXY(car_s + 90, (2 + 4 * lane_num), map_waypoints_s, map_waypoints_x, map_waypoints_y);
+
+            pts_x.push_back(nextWP0[0]);
+            pts_x.push_back(nextWP1[0]);
+            pts_x.push_back(nextWP2[0]);
+
+            pts_y.push_back(nextWP0[1]);
+            pts_y.push_back(nextWP1[1]);
+            pts_y.push_back(nextWP2[1]);
+
+            for(int i = 0; i < pts_x.size() ; i++)
+            {
+                // Shift to Car ref angle of 0 degree
+                double shift_x = pts_x[i] - ref_x;
+                double shift_y = pts_y[i] - ref_y;
+
+                pts_x[i] = (shift_x * cos(0-ref_angle) - shift_y * sin(0-ref_angle));
+                pts_y[i] = (shift_x * sin(0-ref_angle) + shift_y * cos(0-ref_angle));
+            }
+
+            tk::spline fit_s;
+
+            fit_s.set_points(pts_x,pts_y);
+
+            vector<double> next_x_vals;
+            vector<double> next_y_vals;
+
+            for(int i = 0; i < prev_size; i++)
+            {
+                next_x_vals.push_back(previous_path_x[i]);
+                next_y_vals.push_back(previous_path_y[i]);
+            }
+
+            double target_x = 30.0;
+            double target_y = fit_s(target_x);
+
+            double target_dist = sqrt((target_x * target_x) + (target_y * target_y));
+            double x_add_on = 0;
+
+            double dist_inc = 0.44;
+            for(int i = 1; i < 50-prev_size; i++)
+            {
+                double N = (target_dist/(0.02 * ref_v/2.24));
+
+                double x_point = x_add_on + (target_x/N);
+                double y_point = fit_s(x_point);
+
+                x_add_on = x_point;
+
+                double x_point_backup = x_point;
+                double y_point_backup = y_point;
+
+                x_point = (x_point_backup * cos(ref_angle) - y_point_backup * sin(ref_angle));
+                y_point = (x_point_backup * sin(ref_angle) + y_point_backup * cos(ref_angle));
+
+                x_point += ref_x;
+                y_point += ref_y;
+
+                next_x_vals.push_back(x_point);
+                next_y_vals.push_back(y_point);
+            }
+
           	msgJson["next_x"] = next_x_vals;
           	msgJson["next_y"] = next_y_vals;
 
           	auto msg = "42[\"control\","+ msgJson.dump()+"]";
 
-          	//this_thread::sleep_for(chrono::milliseconds(1000));
           	ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
           
         }
@@ -261,9 +607,6 @@ int main() {
     }
   });
 
-  // We don't need this since we're not using HTTP but if it's removed the
-  // program
-  // doesn't compile :-(
   h.onHttpRequest([](uWS::HttpResponse *res, uWS::HttpRequest req, char *data,
                      size_t, size_t) {
     const std::string s = "<h1>Hello world!</h1>";
