@@ -66,6 +66,64 @@ A really helpful resource for doing this project and creating smooth trajectorie
 
 ---
 
+### Model Documentation
+The model was developed in the class to a good extend but still providing enough opprotunity to students to put in additional logic for improved robustmness and performance. One such logic that I implemented is the state machine for lane change. It uses the concepts taught in the class for lane change logic. There are four possible states - Keep lane, Prepare Lane change, Change to left lane and change to right lane. The state transition is based on the inputs from the sensor fusion.
+
+
+#### States Description
+
+-  Keep Lane
+
+This is the default state of the system, this state represents, that the car need to be in the same lane, and not need to change the lane, when possible, try to accelerate and reach the max allowed speed limit of 50mph.
+
+- Prepare Lane Change
+
+This state represents the status when car need to prepare for lane change since the other car in front is driving slower than the speed limit. In this state, car also tries to find out the best lane to change, and best time to change lane safely and efficiently.
+
+- Change Lane : Left
+
+During this state, car changes lane, and then speeds up to reach max allowed speed limit. In this state car also takes the stablization period of 10 simulation cycle (~1sec), before making next lane change, this allows car to be stable.
+
+- Change Lane : Right
+
+During this state, car changes lane, and then speeds up to reach max allowed speed limit. In this state car also takes the stablization period of 10 simulation cycle (~1sec), before making next lane change, this allows car to be stable.
+
+
+This state is different than left lane change, since it gets priority when cost of changing lane becomes same for left and right. The logic is to avoid reaching to left lane which is also considered as the fast lane for highways.
+
+### Information In-outs
+
+We are provided with the different way points around the track to follow. 
+
+- Simulator expects:
+
+-- The sequence of x,y coordinates to follow. The simulator covers each point in 0.02 sec, so the spacing between points, decides the speed of the car.
+
+
+- Simulator provides following information:
+
+-- Car's position in global x,y coordinates
+
+-- Car's position in Frenet coordinate system
+
+-- Car's velocity and yaw 
+
+-- It also provides the list of remaining points, which are not yet visited by simulator and provided as last path points.
+
+
+### Path generation steps
+
+- Our main goal is to create a path which is free from jerks and acceleration limits. For that the most important point to remember is, the path should be continuous, means we should try to utilize the previous path points which were provided to simulator.
+
+- To ease the calculations we convert the global coordinates to car coordinates, and at the end revert from car to global coordinates.
+
+- We chose the different way points, which are atleast 30m apart and then pass those points to spline to fit into a smooth curve.
+
+- By using the spline we try to fit approx 50 path points for simulator to follow by providing the spaced points x points and getting corresponding y points.
+
+- Once we have this vector of points available then we convert them to global coordinates and pass to simulator.
+
+
 ## Dependencies
 
 * cmake >= 3.5
